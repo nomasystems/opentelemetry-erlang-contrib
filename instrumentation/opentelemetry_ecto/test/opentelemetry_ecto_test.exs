@@ -89,6 +89,33 @@ defmodule OpentelemetryEctoTest do
              :otel_attributes.map(attributes)
   end
 
+  test "allow per-request options via telemetry_options" do
+    attach_handler(additional_attributes: %{"config.attribute": "special value", "db.system": "my_system"})
+
+    Repo.all(User,
+      telemetry_options: [
+        otel: %{
+          span_name: "custom span name",
+          attributes: %{
+            "config.attribute": "special value overwritten",
+            "db.system": "my_system",
+            extra: "should add"
+          }
+        }
+      ]
+    )
+
+    assert_receive {:span, span(name: "custom span name", attributes: attributes)}
+
+    # don't merge instrumentation-set attrs but can overwrite config set
+    assert %{
+             "config.attribute": "special value overwritten",
+             "db.system": :postgresql,
+             extra: "should add"
+           } =
+             :otel_attributes.map(attributes)
+  end
+
   test "include additional_attributes" do
     attach_handler(additional_attributes: %{"config.attribute": "special value", "db.instance": "my_instance"})
 

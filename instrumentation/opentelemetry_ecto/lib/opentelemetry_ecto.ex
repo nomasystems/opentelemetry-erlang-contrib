@@ -11,6 +11,32 @@ defmodule OpentelemetryEcto do
   this will create a span called "parent span" with three child spans for each
   query: users, posts, and comments.
 
+  ### Per-Query Options
+
+  Additional attributes can be provided and a span name override on a per-query basis. This can be
+  useful for providing more tailored information where the instrumentation cannot provide such.
+  For instance, when calling a stored procedure, the span name could be updated with the name
+  of the procedure.
+
+  Note that attributes can only be additive. Existing attributes will not be overridden. In
+  several cases, semantic attributes cannot be reliably set. Where these are not set by
+  this instrumentation, you may still set those attribtutes.
+
+  ```
+  Repo.all(User,
+    telemetry_options: [
+      otel: %{
+        span_name: "custom span name",
+        attributes: %{
+          "config.attribute": "special value overwritten",
+          "db.system": "my_system",
+          extra: "should add"
+        }
+      }
+    ]
+  )
+  ```
+
   > #### Note {: .neutral}
   >
   > Due to limitations with how Ecto emits its telemetry, nested preloads are not
@@ -50,13 +76,25 @@ defmodule OpentelemetryEcto do
     :telemetry.attach({__MODULE__, event}, event, &__MODULE__.handle_event/4, config)
   end
 
+  defp query_opts(%{options: options}) do
+    case Keyword.get(options, :otel) do
+      nil -> %{}
+      opts when is_map(opts) -> opts
+      _ -> %{}
+    end
+  end
+
+  defp query_opts(_), do: %{}
+
   @doc false
   def handle_event(
         event,
         measurements,
-        %{query: query, source: source, result: query_result, repo: repo, type: type},
+        %{query: query, source: source, result: query_result, repo: repo, type: type} = meta,
         config
       ) do
+    per_query_opts = query_opts(meta)
+
     # Doing all this even if the span isn't sampled so the sampler
     # could technically use the attributes to decide if it should sample or not
 
@@ -82,7 +120,7 @@ defmodule OpentelemetryEcto do
       end
 
     span_suffix = if source != nil, do: ":#{source}", else: ""
-    span_name = span_prefix <> span_suffix
+    span_name = span_name(span_prefix <> span_suffix, per_query_opts)
 
     time_unit = Keyword.get(config, :time_unit, :microsecond)
     additional_attributes = Keyword.get(config, :additional_attributes, %{})
@@ -111,7 +149,7 @@ defmodule OpentelemetryEcto do
       |> add_measurements(measurements, time_unit)
       |> maybe_add_db_statement(db_statement_config, query)
       |> maybe_add_db_system(repo.__adapter__())
-      |> add_additional_attributes(additional_attributes)
+      |> add_additional_attributes(additional_attributes, per_query_opts)
 
     parent_context =
       case OpentelemetryProcessPropagator.fetch_ctx(self()) do
@@ -209,7 +247,18 @@ defmodule OpentelemetryEcto do
     attributes
   end
 
-  defp add_additional_attributes(attributes, additional_attributes) do
+  defp add_additional_attributes(attrs, extra, %{attributes: per_query_attrs})
+       when is_map(per_query_attrs) do
+    extra
+    |> Map.merge(per_query_attrs)
+    |> Map.merge(attrs)
+  end
+
+  defp add_additional_attributes(attributes, additional_attributes, _) do
     Map.merge(attributes, additional_attributes)
   end
+
+  defp span_name(_, %{span_name: name}) when is_atom(name) or is_binary(name), do: name
+
+  defp span_name(name, _), do: name
 end
